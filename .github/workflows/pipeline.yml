@@ -1,0 +1,59 @@
+
+name: Tourism Project Pipeline
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write   # needed so this workflow can push the retrained model back to the repo
+
+jobs:
+
+  mlops-pipeline:
+    runs-on: ubuntu-latest
+    # Skip re-triggering when the only change is this workflow's own commit
+    # of the retrained model (avoids an infinite push -> run -> push loop)
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install Dependencies
+        run: pip install -r tourism_project/pipeline-requirements.txt
+
+      - name: Register Dataset to Hugging Face Hub
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python tourism_project/model_building/data_registration.py
+
+      - name: Data Preparation
+        run: python tourism_project/model_building/data_prep.py
+
+      - name: Train Model (MLflow tracked) and Register to Hugging Face Hub
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python tourism_project/model_building/train.py
+          python tourism_project/model_building/register_model.py
+
+      - name: Bundle the freshly trained model with the deployed app
+        run: cp tourism_project/model_building/best_model.joblib tourism_project/deployment/best_model.joblib
+
+      - name: Commit updated model back to the repo (Streamlit Cloud redeploys on this push)
+        run: |
+          git config --global user.email "actions@github.com"
+          git config --global user.name "github-actions[bot]"
+          git add tourism_project/deployment/best_model.joblib
+          git diff --cached --quiet || git commit -m "Update trained model [skip ci]"
+          git push
+
+      - name: Deploy Hugging Face redirect Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python tourism_project/model_building/hosting.py
